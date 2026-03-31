@@ -1,0 +1,8 @@
+[project]
+name = "prototype_sih"
+
+[service]
+name = "web"
+
+[service.web]
+run = "npm start"
