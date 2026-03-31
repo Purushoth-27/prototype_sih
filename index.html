@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NSG AXIS — AI Video Analysis</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Rajdhani:wght@400;500;600;700&display=swap');
+  :root {
+    --bg: #0a0d12;
+    --bg2: #0f1318;
+    --bg3: #161b22;
+    --border: rgba(0,255,150,0.12);
+    --border2: rgba(0,255,150,0.25);
+    --green: #00ff96;
+    --green2: #00cc78;
+    --red: #ff3b5c;
+    --amber: #ffaa00;
+    --blue: #3b9eff;
+    --text: #c8d6e5;
+    --text2: #7a8fa6;
+    --mono: 'JetBrains Mono', monospace;
+    --head: 'Rajdhani', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--head); overflow-x: hidden; }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+  .scanline { position: fixed; inset: 0; pointer-events: none; z-index: 999; background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,59,92,0.4)} 50%{box-shadow:0 0 0 8px rgba(255,59,92,0)} }
+  @keyframes scan { 0%{top:-2px} 100%{top:100%} }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes typeIn { from{width:0} to{width:100%} }
+  @keyframes glow { 0%,100%{text-shadow:0 0 8px rgba(0,255,150,0.4)} 50%{text-shadow:0 0 20px rgba(0,255,150,0.8)} }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const THREAT_LEVELS = { LOW: 'LOW', MEDIUM: 'MEDIUM', HIGH: 'HIGH', CRITICAL: 'CRITICAL' };
+const SOURCES = [
+  { id: 'CAM-01', label: 'Perimeter Cam A', type: 'CCTV', status: 'LIVE' },
+  { id: 'CAM-02', label: 'Entry Gate B', type: 'CCTV', status: 'LIVE' },
+  { id: 'DRONE-1', label: 'Aerial Unit Alpha', type: 'DRONE', status: 'LIVE' },
+  { id: 'DRONE-2', label: 'Aerial Unit Beta', type: 'DRONE', status: 'STANDBY' },
+  { id: 'BODYCAM-1', label: 'Unit 7 Bodycam', type: 'BODYCAM', status: 'LIVE' },
+  { id: 'ROBOT-1', label: 'Ground Bot GX1', type: 'ROBOT', status: 'LIVE' },
+];
+
+const ANALYSIS_CAPABILITIES = [
+  { id: 'weapon', label: 'Weapon Detection', icon: '⚠', enabled: true },
+  { id: 'face', label: 'Facial Recognition', icon: '◉', enabled: true },
+  { id: 'crowd', label: 'Crowd Behaviour', icon: '◈', enabled: true },
+  { id: 'loiter', label: 'Loitering Detection', icon: '⊙', enabled: true },
+  { id: 'vehicle', label: 'Vehicle Tracking', icon: '⬡', enabled: false },
+  { id: 'perimeter', label: 'Perimeter Breach', icon: '⬟', enabled: true },
+];
+
+function generateAlert(capId, sourceId, threatLevel) {
+  const templates = {
+    weapon: [`Possible firearm detected near ${sourceId}`, `Metallic object flagged — weapon profile match 87%`, `Unholstered object identified — escalating`],
+    face: [`Unknown individual on watchlist — confidence 94%`, `Face match: ALERT-7743 (active warrant)`, `Facial recognition flagged: ${sourceId} sector`],
+    crowd: [`Abnormal crowd density near ${sourceId}`, `Crowd dispersal pattern — possible stampede risk`, `Sudden movement spike detected in crowd`],
+    loiter: [`Individual loitering > 8 min at entry point`, `Stationary suspect near restricted zone`, `Repeated passes flagged — ${sourceId}`],
+    vehicle: [`Unregistered vehicle — plate mismatch`, `Vehicle exceeding speed threshold in secure zone`, `Abandoned vehicle flagged near perimeter`],
+    perimeter: [`Motion detected in restricted zone`, `Perimeter breach alert — ${sourceId}`, `Fence sensor + visual confirmation`],
+  };
+  const msgs = templates[capId] || ['Anomaly detected'];
+  return msgs[Math.floor(Math.random() * msgs.length)];
+}
+
+function ThreatBadge({ level }) {
+  const colors = { LOW: '#3b9eff', MEDIUM: '#ffaa00', HIGH: '#ff7700', CRITICAL: '#ff3b5c' };
+  return (
+    <span style={{
+      fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: 1,
+      padding: '2px 6px', borderRadius: 2, color: colors[level],
+      border: `1px solid ${colors[level]}`, background: `${colors[level]}18`
+    }}>{level}</span>
+  );
+}
+
+function VideoFeed({ source, alerts, analyzing }) {
+  const canvasRef = useRef(null);
+  const frameRef = useRef(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let raf;
+
+    const entities = Array.from({ length: 4 }, (_, i) => ({
+      x: 40 + Math.random() * 180, y: 40 + Math.random() * 100,
+      vx: (Math.random() - 0.5) * 0.4, vy: (Math.random() - 0.5) * 0.2,
+      size: 6 + Math.random() * 4, type: ['person', 'person', 'vehicle', 'person'][i]
+    }));
+
+    function draw() {
+      frameRef.current++;
+      ctx.clearRect(0, 0, 280, 180);
+      ctx.fillStyle = '#080d0f';
+      ctx.fillRect(0, 0, 280, 180);
+
+      // grid lines
+      ctx.strokeStyle = 'rgba(0,255,150,0.04)';
+      ctx.lineWidth = 0.5;
+      for (let x = 0; x < 280; x += 28) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 180); ctx.stroke(); }
+      for (let y = 0; y < 180; y += 18) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(280, y); ctx.stroke(); }
+
+      // noise
+      for (let i = 0; i < 60; i++) {
+        const nx = Math.random() * 280, ny = Math.random() * 180;
+        const a = Math.random() * 0.08;
+        ctx.fillStyle = `rgba(200,220,240,${a})`;
+        ctx.fillRect(nx, ny, 1, 1);
+      }
+
+      // ground plane
+      ctx.fillStyle = 'rgba(0,255,150,0.04)';
+      ctx.beginPath(); ctx.moveTo(20, 150); ctx.lineTo(260, 150); ctx.lineTo(220, 100); ctx.lineTo(60, 100); ctx.closePath(); ctx.fill();
+
+      // structure outlines
+      ctx.strokeStyle = 'rgba(150,200,255,0.12)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(20, 20, 80, 70);
+      ctx.strokeRect(180, 30, 70, 60);
+
+      if (source.status === 'STANDBY') {
+        ctx.fillStyle = 'rgba(255,170,0,0.7)';
+        ctx.font = '600 11px Rajdhani, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('STANDBY', 140, 95);
+        ctx.fillStyle = 'rgba(255,170,0,0.2)';
+        ctx.fillRect(100, 82, 80, 22);
+        cancelAnimationFrame(raf);
+        return;
+      }
+
+      // entities
+      entities.forEach((e, i) => {
+        e.x += e.vx; e.y += e.vy;
+        if (e.x < 15 || e.x > 265) e.vx *= -1;
+        if (e.y < 15 || e.y > 155) e.vy *= -1;
+
+        const hasAlert = alerts.length > 0 && i === 0;
+        const col = hasAlert ? '#ff3b5c' : '#00ff96';
+
+        if (analyzing) {
+          // bounding box
+          ctx.strokeStyle = col;
+          ctx.lineWidth = hasAlert ? 1.5 : 0.8;
+          ctx.setLineDash([3, 2]);
+          ctx.strokeRect(e.x - e.size, e.y - e.size, e.size * 2, e.size * 2);
+          ctx.setLineDash([]);
+          // corner marks
+          const cs = 5;
+          ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+          [[e.x-e.size,e.y-e.size],[e.x+e.size,e.y-e.size],[e.x-e.size,e.y+e.size],[e.x+e.size,e.y+e.size]].forEach(([cx,cy]) => {
+            ctx.beginPath(); ctx.moveTo(cx, cy+cs*(cy>e.y?-1:1)); ctx.lineTo(cx, cy); ctx.lineTo(cx+cs*(cx>e.x?-1:1), cy); ctx.stroke();
+          });
+          // label
+          ctx.fillStyle = `${col}cc`;
+          ctx.fillRect(e.x - e.size, e.y - e.size - 14, 44, 12);
+          ctx.fillStyle = '#000';
+          ctx.font = '500 7px JetBrains Mono, monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText(hasAlert ? 'THREAT' : e.type.toUpperCase(), e.x - e.size + 2, e.y - e.size - 4);
+          // confidence
+          if (hasAlert) {
+            ctx.fillStyle = '#ff3b5c';
+            ctx.font = '500 6px JetBrains Mono, monospace';
+            ctx.fillText('94%', e.x - e.size + 26, e.y - e.size - 4);
+          }
+        }
+
+        ctx.fillStyle = col;
+        ctx.globalAlpha = hasAlert ? 0.9 : 0.6;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, hasAlert ? e.size * 0.5 : 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+
+      // scan line
+      if (analyzing) {
+        const scanY = (frameRef.current * 1.2) % 180;
+        const grad = ctx.createLinearGradient(0, scanY - 10, 0, scanY + 2);
+        grad.addColorStop(0, 'transparent');
+        grad.addColorStop(1, 'rgba(0,255,150,0.12)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, scanY - 10, 280, 12);
+        ctx.strokeStyle = 'rgba(0,255,150,0.35)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(0, scanY); ctx.lineTo(280, scanY); ctx.stroke();
+      }
+
+      // timestamp
+      const now = new Date();
+      ctx.fillStyle = 'rgba(0,255,150,0.6)';
+      ctx.font = '500 7px JetBrains Mono, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(`${now.toTimeString().slice(0,8)}.${String(now.getMilliseconds()).padStart(3,'0')}`, 5, 172);
+      ctx.textAlign = 'right';
+      ctx.fillText(source.id, 275, 172);
+
+      // live indicator
+      if (source.status === 'LIVE') {
+        ctx.fillStyle = `rgba(0,255,150,${0.5 + 0.5 * Math.sin(frameRef.current * 0.12)})`;
+        ctx.beginPath(); ctx.arc(270, 10, 3, 0, Math.PI * 2); ctx.fill();
+      }
+
+      if (alerts.length > 0) {
+        ctx.strokeStyle = `rgba(255,59,92,${0.3 + 0.2 * Math.sin(frameRef.current * 0.15)})`;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, 278, 178);
+      }
+
+      raf = requestAnimationFrame(draw);
+    }
+    draw();
+    return () => cancelAnimationFrame(raf);
+  }, [source, alerts.length, analyzing]);
+
+  return <canvas ref={canvasRef} width={280} height={180} style={{ display: 'block', width: '100%', borderRadius: 2 }} />;
+}
+
+function AlertRow({ alert, index }) {
+  const colors = { LOW: '#3b9eff', MEDIUM: '#ffaa00', HIGH: '#ff7700', CRITICAL: '#ff3b5c' };
+  const c = colors[alert.level];
+  return (
+    <div style={{
+      display: 'flex', gap: 8, padding: '8px 10px',
+      borderLeft: `2px solid ${c}`, background: `${c}0a`,
+      marginBottom: 4, borderRadius: '0 4px 4px 0',
+      animation: 'fadeIn 0.3s ease', animationDelay: `${index * 0.05}s`, animationFillMode: 'both'
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+          <ThreatBadge level={alert.level} />
+          <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>{alert.source}</span>
+          <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)', marginLeft: 'auto' }}>{alert.time}</span>
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 500 }}>{alert.message}</div>
+        <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)', marginTop: 2 }}>
+          {alert.capability} · conf {alert.confidence}%
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HeatmapPanel() {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#0a0d12'; ctx.fillRect(0, 0, 320, 200);
+    // grid
+    ctx.strokeStyle = 'rgba(0,255,150,0.07)'; ctx.lineWidth = 0.5;
+    for (let x = 0; x < 320; x += 32) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,200); ctx.stroke(); }
+    for (let y = 0; y < 200; y += 20) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(320,y); ctx.stroke(); }
+    // hotspots
+    const hotspots = [
+      { x: 80, y: 60, r: 50, intensity: 0.8 },
+      { x: 200, y: 130, r: 35, intensity: 0.6 },
+      { x: 260, y: 50, r: 28, intensity: 0.4 },
+      { x: 120, y: 160, r: 22, intensity: 0.35 },
+      { x: 310, y: 170, r: 18, intensity: 0.3 },
+    ];
+    hotspots.forEach(h => {
+      const grad = ctx.createRadialGradient(h.x, h.y, 0, h.x, h.y, h.r);
+      const col = h.intensity > 0.6 ? '255,59,92' : h.intensity > 0.45 ? '255,140,0' : '255,200,0';
+      grad.addColorStop(0, `rgba(${col},${h.intensity})`);
+      grad.addColorStop(1, 'transparent');
+      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, Math.PI*2); ctx.fill();
+    });
+    // zone labels
+    ctx.fillStyle = 'rgba(200,220,240,0.5)'; ctx.font = '500 8px JetBrains Mono, monospace'; ctx.textAlign = 'center';
+    [['NORTH GATE',80,18],['EAST WING',230,18],['CENTRAL PLAZA',160,105],['PARKING',270,180]].forEach(([t,x,y]) => {
+      ctx.fillText(t, x, y);
+    });
+    // legend
+    const lg = ctx.createLinearGradient(8, 185, 100, 185);
+    lg.addColorStop(0,'rgba(255,59,92,0.8)'); lg.addColorStop(0.5,'rgba(255,140,0,0.8)'); lg.addColorStop(1,'rgba(255,200,0,0.8)');
+    ctx.fillStyle = lg; ctx.fillRect(8, 187, 92, 6);
+    ctx.fillStyle = 'rgba(200,220,240,0.5)'; ctx.font = '500 7px JetBrains Mono, monospace'; ctx.textAlign = 'left';
+    ctx.fillText('HIGH', 8, 199); ctx.textAlign = 'right'; ctx.fillText('LOW', 100, 199);
+  }, []);
+  return <canvas ref={canvasRef} width={320} height={200} style={{ display: 'block', width: '100%', borderRadius: 2 }} />;
+}
+
+function App() {
+  const [selectedSource, setSelectedSource] = useState(SOURCES[0]);
+  const [capabilities, setCapabilities] = useState(ANALYSIS_CAPABILITIES);
+  const [alerts, setAlerts] = useState([]);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [activeTab, setActiveTab] = useState('FEEDS');
+  const [stats, setStats] = useState({ threats: 0, faces: 0, objects: 0, uptime: 0 });
+  const timerRef = useRef(null);
+  const uptimeRef = useRef(0);
+
+  const enabledCaps = capabilities.filter(c => c.enabled);
+
+  useEffect(() => {
+    if (!analyzing) { clearInterval(timerRef.current); return; }
+    timerRef.current = setInterval(() => {
+      uptimeRef.current++;
+      setStats(s => ({ ...s, uptime: uptimeRef.current }));
+      if (Math.random() < 0.35 && enabledCaps.length > 0) {
+        const cap = enabledCaps[Math.floor(Math.random() * enabledCaps.length)];
+        const src = SOURCES.filter(s => s.status === 'LIVE')[Math.floor(Math.random() * 3)];
+        const levels = ['LOW','LOW','MEDIUM','HIGH','CRITICAL'];
+        const level = levels[Math.floor(Math.random() * levels.length)];
+        const newAlert = {
+          id: Date.now(),
+          level,
+          source: src?.id || 'CAM-01',
+          capability: cap.label,
+          message: generateAlert(cap.id, src?.id || 'CAM-01', level),
+          time: new Date().toTimeString().slice(0, 8),
+          confidence: 70 + Math.floor(Math.random() * 28),
+        };
+        setAlerts(prev => [newAlert, ...prev].slice(0, 30));
+        setStats(s => ({
+          threats: s.threats + (['HIGH','CRITICAL'].includes(level) ? 1 : 0),
+          faces: s.faces + (cap.id === 'face' ? 1 : 0),
+          objects: s.objects + (cap.id === 'weapon' ? 1 : 0),
+          uptime: s.uptime,
+        }));
+      }
+    }, 1800);
+    return () => clearInterval(timerRef.current);
+  }, [analyzing, enabledCaps.length]);
+
+  const toggleCap = id => setCapabilities(prev => prev.map(c => c.id === id ? { ...c, enabled: !c.enabled } : c));
+
+  const critAlerts = alerts.filter(a => a.level === 'CRITICAL').length;
+  const highAlerts = alerts.filter(a => a.level === 'HIGH').length;
+
+  return (
+    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
+      {/* Header */}
+      <header style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '10px 20px', borderBottom: '1px solid var(--border)',
+        background: 'var(--bg2)', position: 'sticky', top: 0, zIndex: 100
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1 }}>
+            <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: 3, color: 'var(--green)', fontFamily: 'var(--head)', animation: 'glow 3s ease-in-out infinite' }}>AXIS</div>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: 'var(--text2)', fontFamily: 'var(--mono)' }}>AI SURVEILLANCE INTEL</div>
+          </div>
+          <div style={{ width: 1, height: 32, background: 'var(--border)' }} />
+          <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)', lineHeight: 1.6 }}>
+            <div>NATIONAL SECURITY GUARD</div>
+            <div style={{ color: 'var(--green)' }}>INTEGRATED COMMAND POST</div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          {critAlerts > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', border: '1px solid var(--red)', borderRadius: 2, animation: 'pulse 1.5s infinite', background: 'rgba(255,59,92,0.08)' }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--red)', display: 'block' }} />
+              <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--red)', fontWeight: 700 }}>{critAlerts} CRITICAL</span>
+            </div>
+          )}
+          <button
+            onClick={() => setAnalyzing(a => !a)}
+            style={{
+              padding: '6px 18px', fontSize: 13, fontWeight: 700, fontFamily: 'var(--head)', letterSpacing: 1,
+              background: analyzing ? 'rgba(255,59,92,0.12)' : 'rgba(0,255,150,0.12)',
+              border: `1px solid ${analyzing ? 'var(--red)' : 'var(--green)'}`,
+              color: analyzing ? 'var(--red)' : 'var(--green)', cursor: 'pointer', borderRadius: 2
+            }}
+          >{analyzing ? '◼  STOP ANALYSIS' : '▶  START ANALYSIS'}</button>
+        </div>
+      </header>
+
+      {/* Status bar */}
+      <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', background: 'var(--bg2)' }}>
+        {[
+          { label: 'ACTIVE FEEDS', value: SOURCES.filter(s => s.status === 'LIVE').length, color: 'var(--green)' },
+          { label: 'THREATS DETECTED', value: stats.threats, color: 'var(--red)' },
+          { label: 'FACES MATCHED', value: stats.faces, color: 'var(--amber)' },
+          { label: 'OBJECTS FLAGGED', value: stats.objects, color: 'var(--blue)' },
+          { label: 'ANALYSIS TIME', value: `${stats.uptime}s`, color: 'var(--text2)' },
+          { label: 'TOTAL ALERTS', value: alerts.length, color: 'var(--text)' },
+        ].map((s, i) => (
+          <div key={i} style={{ flex: 1, padding: '6px 12px', borderRight: '1px solid var(--border)', textAlign: 'center' }}>
+            <div style={{ fontSize: 9, letterSpacing: 1.5, color: 'var(--text2)', fontFamily: 'var(--mono)', marginBottom: 1 }}>{s.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: 'var(--head)' }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', maxHeight: 'calc(100vh - 110px)' }}>
+        {/* Left panel — source list + capabilities */}
+        <div style={{ width: 220, borderRight: '1px solid var(--border)', overflow: 'auto', background: 'var(--bg2)' }}>
+          <div style={{ padding: '10px 12px 4px', fontSize: 10, letterSpacing: 2, color: 'var(--text2)', fontFamily: 'var(--mono)' }}>INPUT SOURCES</div>
+          {SOURCES.map(src => (
+            <div key={src.id}
+              onClick={() => setSelectedSource(src)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', cursor: 'pointer',
+                borderLeft: selectedSource.id === src.id ? '2px solid var(--green)' : '2px solid transparent',
+                background: selectedSource.id === src.id ? 'rgba(0,255,150,0.05)' : 'transparent',
+              }}>
+              <div style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: src.status === 'LIVE' ? 'var(--green)' : 'var(--amber)',
+                boxShadow: src.status === 'LIVE' ? '0 0 6px var(--green)' : '0 0 6px var(--amber)'
+              }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{src.label}</div>
+                <div style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>{src.id} · {src.type}</div>
+              </div>
+            </div>
+          ))}
+
+          <div style={{ height: 1, background: 'var(--border)', margin: '8px 0' }} />
+          <div style={{ padding: '4px 12px 4px', fontSize: 10, letterSpacing: 2, color: 'var(--text2)', fontFamily: 'var(--mono)' }}>DETECTION MODULES</div>
+          {capabilities.map(cap => (
+            <div key={cap.id}
+              onClick={() => toggleCap(cap.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', cursor: 'pointer',
+                opacity: cap.enabled ? 1 : 0.4,
+              }}>
+              <div style={{
+                width: 14, height: 14, border: `1px solid ${cap.enabled ? 'var(--green)' : 'var(--text2)'}`,
+                borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: cap.enabled ? 'rgba(0,255,150,0.15)' : 'transparent', flexShrink: 0
+              }}>
+                {cap.enabled && <span style={{ color: 'var(--green)', fontSize: 8, lineHeight: 1 }}>✓</span>}
+              </div>
+              <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: cap.enabled ? 'var(--text)' : 'var(--text2)' }}>{cap.label}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Main area */}
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+          {/* Tabs */}
+          <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg3)' }}>
+            {['FEEDS', 'ALERTS', 'HEATMAP', 'REPORT'].map(tab => (
+              <button key={tab} onClick={() => setActiveTab(tab)}
+                style={{
+                  padding: '8px 18px', fontSize: 11, letterSpacing: 2, fontFamily: 'var(--mono)',
+                  fontWeight: activeTab === tab ? 700 : 400,
+                  color: activeTab === tab ? 'var(--green)' : 'var(--text2)',
+                  background: 'transparent', border: 'none', cursor: 'pointer',
+                  borderBottom: activeTab === tab ? '2px solid var(--green)' : '2px solid transparent',
+                  marginBottom: -1
+                }}>{tab}</button>
+            ))}
+          </div>
+
+          {activeTab === 'FEEDS' && (
+            <div style={{ padding: 16, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+              {SOURCES.map(src => {
+                const srcAlerts = alerts.filter(a => a.source === src.id).slice(0, 3);
+                const isSel = src.id === selectedSource.id;
+                return (
+                  <div key={src.id}
+                    onClick={() => setSelectedSource(src)}
+                    style={{
+                      width: 'calc(33.33% - 11px)', minWidth: 240, background: 'var(--bg3)',
+                      border: `1px solid ${isSel ? 'var(--green2)' : srcAlerts.some(a => a.level === 'CRITICAL') ? 'var(--red)' : 'var(--border)'}`,
+                      borderRadius: 4, overflow: 'hidden', cursor: 'pointer',
+                      boxShadow: isSel ? '0 0 12px rgba(0,255,150,0.1)' : 'none',
+                    }}>
+                    <div style={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)' }}>
+                      <span style={{ fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600 }}>{src.id}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ fontSize: 9, fontFamily: 'var(--mono)', color: src.status === 'LIVE' ? 'var(--green)' : 'var(--amber)' }}>{src.status}</span>
+                        <span style={{ fontSize: 9, color: 'var(--text2)', fontFamily: 'var(--mono)' }}>{src.type}</span>
+                      </div>
+                    </div>
+                    <VideoFeed source={src} alerts={srcAlerts} analyzing={analyzing} />
+                    {srcAlerts.length > 0 && (
+                      <div style={{ padding: '4px 6px', borderTop: '1px solid var(--border)', maxHeight: 55, overflow: 'hidden' }}>
+                        {srcAlerts.slice(0, 1).map(a => (
+                          <div key={a.id} style={{ fontSize: 10, display: 'flex', gap: 5, alignItems: 'center' }}>
+                            <ThreatBadge level={a.level} />
+                            <span style={{ color: 'var(--text2)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {activeTab === 'ALERTS' && (
+            <div style={{ padding: 16, display: 'flex', gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text2)', letterSpacing: 1 }}>
+                    LIVE ALERT FEED — {alerts.length} EVENTS
+                  </div>
+                  <button onClick={() => setAlerts([])}
+                    style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--red)', background: 'transparent', border: '1px solid var(--red)', padding: '2px 8px', cursor: 'pointer', borderRadius: 2 }}>
+                    CLEAR
+                  </button>
+                </div>
+                {alerts.length === 0 ? (
+                  <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text2)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+                    {analyzing ? 'MONITORING... NO EVENTS YET' : 'START ANALYSIS TO BEGIN MONITORING'}
+                  </div>
+                ) : (
+                  alerts.map((a, i) => <AlertRow key={a.id} alert={a} index={i} />)
+                )}
+              </div>
+              <div style={{ width: 180 }}>
+                <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)', letterSpacing: 1, marginBottom: 8 }}>BY SEVERITY</div>
+                {['CRITICAL','HIGH','MEDIUM','LOW'].map(level => {
+                  const count = alerts.filter(a => a.level === level).length;
+                  const pct = alerts.length ? (count / alerts.length * 100) : 0;
+                  const c = { CRITICAL:'var(--red)', HIGH:'#ff7700', MEDIUM:'var(--amber)', LOW:'var(--blue)' }[level];
+                  return (
+                    <div key={level} style={{ marginBottom: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: c }}>{level}</span>
+                        <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>{count}</span>
+                      </div>
+                      <div style={{ height: 4, background: 'var(--bg3)', borderRadius: 2 }}>
+                        <div style={{ height: '100%', width: `${pct}%`, background: c, borderRadius: 2, transition: 'width 0.5s' }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'HEATMAP' && (
+            <div style={{ padding: 16 }}>
+              <div style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text2)', letterSpacing: 1, marginBottom: 10 }}>
+                ACTIVITY HEATMAP — THREAT DENSITY OVERLAY
+              </div>
+              <div style={{ display: 'flex', gap: 16 }}>
+                <div style={{ flex: 1, background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+                  <HeatmapPanel />
+                </div>
+                <div style={{ width: 200 }}>
+                  <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)', letterSpacing: 1, marginBottom: 8 }}>ZONE ACTIVITY</div>
+                  {[['NORTH GATE', 87, 'var(--red)'], ['CENTRAL PLAZA', 62, '#ff7700'], ['EAST WING', 44, 'var(--amber)'], ['PARKING', 28, 'var(--blue)']].map(([zone, val, col]) => (
+                    <div key={zone} style={{ marginBottom: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text)' }}>{zone}</span>
+                        <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: col }}>{val}%</span>
+                      </div>
+                      <div style={{ height: 3, background: 'var(--bg3)', borderRadius: 2 }}>
+                        <div style={{ height: '100%', width: `${val}%`, background: col, borderRadius: 2 }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'REPORT' && (
+            <div style={{ padding: 16, fontFamily: 'var(--mono)', fontSize: 11 }}>
+              <div style={{ color: 'var(--text2)', letterSpacing: 1, marginBottom: 12 }}>ANALYSIS REPORT — AUTO GENERATED</div>
+              <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 4, padding: 16, lineHeight: 2 }}>
+                <div style={{ color: 'var(--green)', fontWeight: 700, marginBottom: 8, letterSpacing: 2 }}>NSG AXIS // INCIDENT SUMMARY</div>
+                <div>SESSION DATE: {new Date().toDateString().toUpperCase()}</div>
+                <div>ANALYSIS DURATION: {stats.uptime}s</div>
+                <div>ACTIVE DETECTION MODULES: {enabledCaps.length} / {capabilities.length}</div>
+                <div style={{ height: 1, background: 'var(--border)', margin: '10px 0' }} />
+                <div style={{ color: 'var(--amber)' }}>THREAT SUMMARY</div>
+                <div>TOTAL EVENTS LOGGED: {alerts.length}</div>
+                <div style={{ color: 'var(--red)' }}>CRITICAL EVENTS: {critAlerts}</div>
+                <div style={{ color: '#ff7700' }}>HIGH SEVERITY: {highAlerts}</div>
+                <div style={{ color: 'var(--amber)' }}>MEDIUM: {alerts.filter(a => a.level === 'MEDIUM').length}</div>
+                <div style={{ color: 'var(--blue)' }}>LOW: {alerts.filter(a => a.level === 'LOW').length}</div>
+                <div style={{ height: 1, background: 'var(--border)', margin: '10px 0' }} />
+                <div style={{ color: 'var(--amber)' }}>DETECTION BREAKDOWN</div>
+                {capabilities.filter(c => c.enabled).map(cap => {
+                  const count = alerts.filter(a => a.capability === cap.label).length;
+                  return <div key={cap.id} style={{ color: count > 0 ? 'var(--text)' : 'var(--text2)' }}>{cap.label}: {count} event{count !== 1 ? 's' : ''}</div>;
+                })}
+                <div style={{ height: 1, background: 'var(--border)', margin: '10px 0' }} />
+                <div style={{ color: 'var(--amber)' }}>SOURCE ACTIVITY</div>
+                {SOURCES.map(src => {
+                  const count = alerts.filter(a => a.source === src.id).length;
+                  return <div key={src.id} style={{ color: count > 0 ? 'var(--text)' : 'var(--text2)' }}>{src.id} ({src.type}): {count} alert{count !== 1 ? 's' : ''}</div>;
+                })}
+                <div style={{ height: 1, background: 'var(--border)', margin: '10px 0' }} />
+                <div style={{ color: 'var(--text2)' }}>SYSTEM STATUS: {analyzing ? '◉ ACTIVE MONITORING' : '◯ STANDBY'}</div>
+                <div style={{ color: 'var(--text2)' }}>REPORT GENERATED: {new Date().toISOString()}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
