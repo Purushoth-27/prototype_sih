@@ -17,6 +17,7 @@ body {
   background:
     radial-gradient(circle at top, rgba(15, 23, 42, 0.8), transparent 40%),
     #020617;
+  color: #e2e8f0;
 }
 
 a {
@@ -35,8 +36,25 @@ a {
   animation: sweep 10s linear infinite;
 }
 
+.hud-sweep {
+  background: linear-gradient(
+    180deg,
+    rgba(20, 184, 166, 0.18),
+    rgba(20, 184, 166, 0)
+  );
+  animation: hud 4.5s linear infinite;
+}
+
 .feed-grid {
   min-height: 240px;
+}
+
+.status-pulse {
+  animation: signal 1.8s ease-in-out infinite;
+}
+
+.alert-enter {
+  animation: alertFade 280ms ease-out;
 }
 
 @keyframes sweep {
@@ -45,5 +63,42 @@ a {
   }
   100% {
     transform: translateY(10%);
+  }
+}
+
+@keyframes hud {
+  0% {
+    transform: translateY(-120%);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(560%);
+    opacity: 0;
+  }
+}
+
+@keyframes signal {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);
+    transform: scale(1.05);
+  }
+}
+
+@keyframes alertFade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

@@ -5,4 +5,5 @@ name = "prototype_sih"
 name = "web"
 
 [service.web]
+build = "npm run build"
 run = "npm start"

@@ -1,21 +1,5 @@
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type PropsWithChildren,
-} from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
 import { toast } from "sonner";
-
-import {
-  demoFeeds,
-  demoIncidents,
-  demoMatches,
-  demoReports,
-  demoWatchlist,
-} from "./demo-data";
-import { hasSupabase, supabase } from "./supabase";
 import type {
   Feed,
   Incident,
@@ -25,6 +9,8 @@ import type {
   WatchlistEntry,
   WatchlistMatch,
 } from "./types";
+import { isBackendConfigured, getDemoStoreSnapshot, getFeeds, getIncidents, getReports, getWatchlist, getWatchlistMatches, createIncident as createIncidentRecord, createReport as createReportRecord, createWatchlistEntry as createWatchlistRecord, ensureSeededBackend, generateSimulatedIncident, nextSimulationDelay, updateIncident as updateIncidentRecord } from "../services/dataService";
+import { supabase } from "./supabase";
 
 type DataContextValue = {
   feeds: Feed[];
@@ -34,6 +20,7 @@ type DataContextValue = {
   reports: Report[];
   loading: boolean;
   usingDemoMode: boolean;
+  latestRealtimeId: string | null;
   acknowledgeIncident: (id: string) => Promise<void>;
   resolveIncident: (id: string) => Promise<void>;
   createIncident: (
@@ -55,33 +42,6 @@ type DataContextValue = {
 
 const DataContext = createContext<DataContextValue | null>(null);
 
-const DEMO_KEY = "axis-demo-state";
-
-function persistDemoState(state: Omit<DataContextValue, "loading" | "usingDemoMode" | "acknowledgeIncident" | "resolveIncident" | "createIncident" | "createReport" | "createWatchlistEntry">) {
-  localStorage.setItem(DEMO_KEY, JSON.stringify(state));
-}
-
-function readDemoState() {
-  const cached = localStorage.getItem(DEMO_KEY);
-  if (!cached) {
-    return {
-      feeds: demoFeeds,
-      incidents: demoIncidents,
-      watchlist: demoWatchlist,
-      matches: demoMatches,
-      reports: demoReports,
-    };
-  }
-
-  return JSON.parse(cached) as {
-    feeds: Feed[];
-    incidents: Incident[];
-    watchlist: WatchlistEntry[];
-    matches: WatchlistMatch[];
-    reports: Report[];
-  };
-}
-
 export function DataProvider({ children }: PropsWithChildren) {
   const [feeds, setFeeds] = useState<Feed[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -89,81 +49,102 @@ export function DataProvider({ children }: PropsWithChildren) {
   const [matches, setMatches] = useState<WatchlistMatch[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
+  const [latestRealtimeId, setLatestRealtimeId] = useState<string | null>(null);
+  const [backendAvailable, setBackendAvailable] = useState(isBackendConfigured());
+  const demoTimerRef = useRef<number | null>(null);
+
+  const usingDemoMode = !backendAvailable;
 
   useEffect(() => {
-    if (!hasSupabase || !supabase) {
-      const local = readDemoState();
-      setFeeds(local.feeds);
-      setIncidents(local.incidents);
-      setWatchlist(local.watchlist);
-      setMatches(local.matches);
-      setReports(local.reports);
-      setLoading(false);
-
-      const interval = window.setInterval(() => {
-        setIncidents((current) => {
-          const next: Incident = {
-            id: `INC-${String(Date.now()).slice(-6)}`,
-            feed_id: demoFeeds[Math.floor(Math.random() * 3)].id,
-            threat_type: [
-              "Suspicious motion cluster",
-              "Weapon silhouette detected",
-              "Perimeter traversal anomaly",
-              "Identity mismatch on checkpoint",
-            ][Math.floor(Math.random() * 4)],
-            confidence_score: 72 + Math.floor(Math.random() * 26),
-            severity: ["MEDIUM", "HIGH", "CRITICAL"][Math.floor(Math.random() * 3)] as Incident["severity"],
-            status: "Open",
-            assigned_to: "Auto-routed",
-            timestamp: new Date().toISOString(),
-            notes: "Demo-mode realtime event emitted locally because Supabase is not configured.",
-          };
-          const updated = [next, ...current].slice(0, 24);
-          toast.warning("New alert received", {
-            description: `${next.threat_type} on ${demoFeeds.find((feed) => feed.id === next.feed_id)?.name ?? next.feed_id}`,
-          });
-          return updated;
-        });
-      }, 30000);
-
-      return () => window.clearInterval(interval);
-    }
+    let isMounted = true;
 
     const load = async () => {
-      const [
-        feedsResult,
-        incidentsResult,
-        watchlistResult,
-        matchesResult,
-        reportsResult,
-      ] = await Promise.all([
-        supabase.from("feeds").select("*").order("created_at"),
-        supabase.from("incidents").select("*").order("timestamp", { ascending: false }),
-        supabase.from("watchlist").select("*").order("created_at", { ascending: false }),
-        supabase.from("watchlist_matches").select("*").order("matched_at", { ascending: false }),
-        supabase.from("reports").select("*").order("created_at", { ascending: false }),
-      ]);
+      try {
+        if (!usingDemoMode) {
+          await ensureSeededBackend();
+        }
 
-      const feedRows = (feedsResult.data as Feed[]) ?? [];
-      if (!feedRows.length) {
-        await supabase.from("feeds").insert(demoFeeds);
-        await supabase.from("incidents").insert(demoIncidents);
-        await supabase.from("watchlist").insert(demoWatchlist);
-        await supabase.from("watchlist_matches").insert(demoMatches);
-        await supabase.from("reports").insert(demoReports);
-        toast.success("AXIS demo data seeded");
-        return load();
+        const [feedRows, incidentRows, watchlistRows, matchRows, reportRows] =
+          await Promise.all([
+            getFeeds(),
+            getIncidents(),
+            getWatchlist(),
+            getWatchlistMatches(),
+            getReports(),
+          ]);
+
+        if (!isMounted) return;
+        setFeeds(feedRows);
+        setIncidents(incidentRows);
+        setWatchlist(watchlistRows);
+        setMatches(matchRows);
+        setReports(reportRows);
+        setBackendAvailable(!usingDemoMode);
+      } catch (error) {
+        if (!isMounted) return;
+
+        const demoStore = getDemoStoreSnapshot();
+        console.error("Falling back to demo data", error);
+        setBackendAvailable(false);
+        setFeeds(demoStore.feeds);
+        setIncidents(demoStore.incidents);
+        setWatchlist(demoStore.watchlist);
+        setMatches(demoStore.matches);
+        setReports(demoStore.reports);
+        toast.error("Backend unavailable", {
+          description: "AXIS switched to demo mode so the dashboard stays usable.",
+        });
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
       }
-
-      setFeeds(feedRows);
-      setIncidents((incidentsResult.data as Incident[]) ?? []);
-      setWatchlist((watchlistResult.data as WatchlistEntry[]) ?? []);
-      setMatches((matchesResult.data as WatchlistMatch[]) ?? []);
-      setReports((reportsResult.data as Report[]) ?? []);
-      setLoading(false);
     };
 
     void load();
+
+    if (!usingDemoMode || !supabase) {
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, [usingDemoMode]);
+
+  useEffect(() => {
+    if (!usingDemoMode || loading || feeds.length === 0) {
+      return;
+    }
+
+    const schedule = () => {
+      demoTimerRef.current = window.setTimeout(async () => {
+        const next = generateSimulatedIncident(feeds);
+        await createIncidentRecord(next);
+        setIncidents((current) => [next, ...current]);
+        setLatestRealtimeId(next.id);
+        toast.warning("New alert received", {
+          description: `${next.threat_type} on ${feeds.find((feed) => feed.id === next.feed_id)?.name ?? next.feed_id}`,
+        });
+        schedule();
+      }, nextSimulationDelay());
+    };
+
+    schedule();
+
+    return () => {
+      if (demoTimerRef.current) {
+        window.clearTimeout(demoTimerRef.current);
+      }
+    };
+  }, [feeds, loading, usingDemoMode]);
+
+  useEffect(() => {
+    if (usingDemoMode || !supabase) {
+      return;
+    }
 
     const channel = supabase
       .channel("axis-incidents")
@@ -172,7 +153,13 @@ export function DataProvider({ children }: PropsWithChildren) {
         { event: "INSERT", schema: "public", table: "incidents" },
         (payload) => {
           const next = payload.new as Incident;
-          setIncidents((current) => [next, ...current]);
+          setIncidents((current) => {
+            if (current.some((incident) => incident.id === next.id)) {
+              return current;
+            }
+            return [next, ...current];
+          });
+          setLatestRealtimeId(next.id);
           toast.warning("New alert received", {
             description: `${next.threat_type} from ${next.feed_id}`,
           });
@@ -183,38 +170,16 @@ export function DataProvider({ children }: PropsWithChildren) {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, []);
-
-  useEffect(() => {
-    if (!hasSupabase && !loading) {
-      persistDemoState({ feeds, incidents, watchlist, matches, reports });
-    }
-  }, [feeds, incidents, loading, matches, reports, watchlist]);
+  }, [usingDemoMode]);
 
   const updateStatus = async (id: string, status: IncidentStatus) => {
-    if (!hasSupabase || !supabase) {
-      setIncidents((current) => {
-        const updated = current.map((incident) =>
-          incident.id === id ? { ...incident, status } : incident,
-        );
-        persistDemoState({ feeds, incidents: updated, watchlist, matches, reports });
-        return updated;
-      });
-      toast.success(
-        status === "Resolved" ? "Incident resolved" : "Incident acknowledged",
+    const updated = await updateIncidentRecord(id, { status });
+    if (updated) {
+      setIncidents((current) =>
+        current.map((incident) => (incident.id === id ? updated : incident)),
       );
-      return;
     }
-
-    await supabase.from("incidents").update({ status }).eq("id", id);
-    setIncidents((current) =>
-      current.map((incident) =>
-        incident.id === id ? { ...incident, status } : incident,
-      ),
-    );
-    toast.success(
-      status === "Resolved" ? "Incident resolved" : "Incident acknowledged",
-    );
+    toast.success(status === "Resolved" ? "Incident resolved" : "Incident acknowledged");
   };
 
   const value = useMemo<DataContextValue>(
@@ -225,68 +190,33 @@ export function DataProvider({ children }: PropsWithChildren) {
       matches,
       reports,
       loading,
-      usingDemoMode: !hasSupabase,
+      usingDemoMode,
+      latestRealtimeId,
       acknowledgeIncident: (id) => updateStatus(id, "Acknowledged"),
       resolveIncident: (id) => updateStatus(id, "Resolved"),
       createIncident: async (payload) => {
-        const next: Incident = {
-          ...payload,
-          id: `INC-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
-          timestamp: payload.timestamp ?? new Date().toISOString(),
-        };
-
-        if (!hasSupabase || !supabase) {
-          const updated = [next, ...incidents];
-          setIncidents(updated);
-          persistDemoState({ feeds, incidents: updated, watchlist, matches, reports });
-          toast.warning("New alert received", {
-            description: next.threat_type,
-          });
-          return;
-        }
-
-        await supabase.from("incidents").insert(next);
+        const next = await createIncidentRecord(payload);
+        setIncidents((current) => [next, ...current]);
+        setLatestRealtimeId(next.id);
+        toast.warning("New alert received", {
+          description: next.threat_type,
+        });
       },
       createReport: async (payload) => {
-        const next: Report = {
-          id: `REP-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
-          created_at: new Date().toISOString(),
-          ...payload,
-        };
-
-        if (!hasSupabase || !supabase) {
-          const updated = [next, ...reports];
-          setReports(updated);
-          persistDemoState({ feeds, incidents, watchlist, matches, reports: updated });
-          toast.success("Report generated");
-          return;
-        }
-
-        await supabase.from("reports").insert(next);
+        const next = await createReportRecord(payload);
+        setReports((current) => [next, ...current]);
         toast.success("Report generated");
       },
       createWatchlistEntry: async (entry) => {
-        const next: WatchlistEntry = {
-          id: `WL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
-          created_at: new Date().toISOString(),
+        const next = await createWatchlistRecord({
           associated_feed: entry.associated_feed ?? feeds[0]?.name ?? "CCTV-01",
-          last_seen: entry.last_seen ?? new Date().toISOString(),
           ...entry,
-        };
-
-        if (!hasSupabase || !supabase) {
-          const updated = [next, ...watchlist];
-          setWatchlist(updated);
-          persistDemoState({ feeds, incidents, watchlist: updated, matches, reports });
-          toast.success("Watchlist entry added");
-          return;
-        }
-
-        await supabase.from("watchlist").insert(next);
+        });
+        setWatchlist((current) => [next, ...current]);
         toast.success("Watchlist entry added");
       },
     }),
-    [feeds, incidents, loading, matches, reports, watchlist],
+    [feeds, incidents, latestRealtimeId, loading, matches, reports, usingDemoMode, watchlist],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
