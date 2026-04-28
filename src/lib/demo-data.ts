@@ -58,13 +58,13 @@ export const demoIncidents: Incident[] = [
   ["INC-010", "feed-bodycam-07", "Aggressive posture classification", 73, "MEDIUM", "Open", "Op. Das", 21.4],
 ].map(
   ([id, feed_id, threat_type, confidence_score, severity, status, assigned_to, hours]) => ({
-    id,
-    feed_id,
-    threat_type,
-    confidence_score,
+    id: id as string,
+    feed_id: feed_id as string,
+    threat_type: threat_type as string,
+    confidence_score: confidence_score as number,
     severity: severity as Incident["severity"],
     status: status as Incident["status"],
-    assigned_to,
+    assigned_to: assigned_to as string,
     timestamp: ago(hours as number),
     notes:
       "AI pipeline correlated movement, object, and identity signals. Operator review recommended within the next response window.",
